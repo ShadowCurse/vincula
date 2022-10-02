@@ -1,17 +1,12 @@
 mod args;
+mod config;
 
+use args::{setup_logging, Args};
 use clap::Parser;
-
-use args::{setup_log, Args};
 
 fn main() {
     let args = Args::parse();
-
-    if args.debug {
-        setup_log(log::LevelFilter::Debug);
-    } else {
-        setup_log(log::LevelFilter::Info);
-    }
+    setup_logging(args.debug);
 
     println!("Hello, world!");
 }

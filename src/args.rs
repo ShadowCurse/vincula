@@ -21,10 +21,17 @@ pub struct Args {
     pub mount_dir: PathBuf,
 }
 
-pub fn setup_log(level: log::LevelFilter){
+pub fn setup_logging(debug: bool) {
+    if debug {
+        init_logging(log::LevelFilter::Debug);
+    } else {
+        init_logging(log::LevelFilter::Info);
+    }
+}
+
+fn init_logging(level: log::LevelFilter) {
     env_logger::Builder::from_default_env()
         .format_timestamp_secs()
         .filter(None, level)
         .init();
 }
-
