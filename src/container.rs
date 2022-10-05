@@ -1,6 +1,8 @@
 use std::ffi::CString;
 use std::path::PathBuf;
 
+use crate::args::Args;
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum Error {
     #[error("No binary path provided in the commands")]
@@ -35,6 +37,27 @@ impl ContainerConfig {
             uid,
             mount_dir,
         })
+    }
+}
+
+pub struct Container {
+    config: ContainerConfig,
+}
+
+impl Container {
+    pub fn new(args: Args) -> Result<Container, Error> {
+        let config = ContainerConfig::new(args.command, args.uid, args.mount_dir)?;
+        Ok(Container { config })
+    }
+
+    pub fn create(&mut self) -> Result<(), Error> {
+        log::debug!("Creation finished");
+        Ok(())
+    }
+
+    pub fn clean_exit(&mut self) -> Result<(), Error> {
+        log::debug!("Cleaning container");
+        Ok(())
     }
 }
 
