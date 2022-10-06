@@ -16,9 +16,9 @@ pub enum Error {
     #[error("Unsupported architecture")]
     UnsupportedArchitecture,
     #[error("Error while getting system info: {0}")]
-    SystemInfoError(Errno),
+    SystemInfo(Errno),
     #[error("Error while scanning system info: {0}")]
-    SystemInfoScanError(ScanError),
+    SystemInfoScan(ScanError),
 }
 
 #[derive(Debug, Clone)]
@@ -77,7 +77,7 @@ pub const MINIMAL_KERNEL_VERSION: f32 = 4.8;
 pub const SUPPORTED_ARCH: &str = "x86_64";
 
 pub fn check_linux_version() -> Result<(), Error> {
-    let host = uname().map_err(Error::SystemInfoError)?;
+    let host = uname().map_err(Error::SystemInfo)?;
     log::debug!("Linux release: {:?}", host.release());
 
     let version = scan_fmt!(
@@ -87,7 +87,7 @@ pub fn check_linux_version() -> Result<(), Error> {
         "{f}.{}",
         f32
     )
-    .map_err(Error::SystemInfoScanError)?;
+    .map_err(Error::SystemInfoScan)?;
 
     if version < MINIMAL_KERNEL_VERSION {
         return Err(Error::UnsupportedKernelVersion);
