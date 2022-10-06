@@ -1,12 +1,24 @@
 use std::ffi::CString;
 use std::path::PathBuf;
 
+use nix::errno::Errno;
+use nix::sys::utsname::uname;
+use scan_fmt::{parse::ScanError, scan_fmt};
+
 use crate::args::Args;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum Error {
     #[error("No binary path provided in the commands")]
     NoBinayPath,
+    #[error("Unsupported kernel version")]
+    UnsupportedKernelVersion,
+    #[error("Unsupported architecture")]
+    UnsupportedArchitecture,
+    #[error("Error while getting system info: {0}")]
+    SystemInfoError(Errno),
+    #[error("Error while scanning system info: {0}")]
+    SystemInfoScanError(ScanError),
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +71,33 @@ impl Container {
         log::debug!("Cleaning container");
         Ok(())
     }
+}
+
+pub const MINIMAL_KERNEL_VERSION: f32 = 4.8;
+pub const SUPPORTED_ARCH: &str = "x86_64";
+
+pub fn check_linux_version() -> Result<(), Error> {
+    let host = uname().map_err(Error::SystemInfoError)?;
+    log::debug!("Linux release: {:?}", host.release());
+
+    let version = scan_fmt!(
+        host.release()
+            .to_str()
+            .expect("System version should be a valid UTF-8 string"),
+        "{f}.{}",
+        f32
+    )
+    .map_err(Error::SystemInfoScanError)?;
+
+    if version < MINIMAL_KERNEL_VERSION {
+        return Err(Error::UnsupportedKernelVersion);
+    }
+
+    if host.machine() != SUPPORTED_ARCH {
+        return Err(Error::UnsupportedArchitecture);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

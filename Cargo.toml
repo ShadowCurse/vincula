@@ -7,4 +7,6 @@ edition = "2021"
 clap = { version = "4.0.7", features = ["derive"] }
 env_logger = "0.9.1"
 log = "0.4.17"
+nix = "0.25.0"
+scan_fmt = "0.2.6"
 thiserror = "1.0.37"
