@@ -1,11 +1,14 @@
 use std::ffi::CString;
+use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
 
 use nix::errno::Errno;
 use nix::sys::utsname::uname;
+use nix::unistd::close;
 use scan_fmt::{parse::ScanError, scan_fmt};
 
 use crate::args::Args;
+use crate::sockets::create_socketpair;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum Error {
@@ -19,6 +22,14 @@ pub enum Error {
     SystemInfo(Errno),
     #[error("Error while scanning system info: {0}")]
     SystemInfoScan(ScanError),
+    #[error("Error while creating socket pair: {0}")]
+    SocketPairCreation(Errno),
+    #[error("Error while closing socket: {0}")]
+    SocketClose(Errno),
+    #[error("Error while sending data into socket: {0}")]
+    SocketSend(Errno),
+    #[error("Error while receiving data from socket: {0}")]
+    SocketReceive(Errno),
 }
 
 #[derive(Debug, Clone)]
@@ -54,12 +65,14 @@ impl ContainerConfig {
 
 pub struct Container {
     config: ContainerConfig,
+    sockets: (RawFd, RawFd),
 }
 
 impl Container {
     pub fn new(args: Args) -> Result<Container, Error> {
         let config = ContainerConfig::new(args.command, args.uid, args.mount_dir)?;
-        Ok(Container { config })
+        let sockets = create_socketpair()?;
+        Ok(Container { config, sockets })
     }
 
     pub fn create(&mut self) -> Result<(), Error> {
@@ -69,6 +82,8 @@ impl Container {
 
     pub fn clean_exit(&mut self) -> Result<(), Error> {
         log::debug!("Cleaning container");
+        close(self.sockets.0).map_err(Error::SocketClose)?;
+        close(self.sockets.1).map_err(Error::SocketClose)?;
         Ok(())
     }
 }

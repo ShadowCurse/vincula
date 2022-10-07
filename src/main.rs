@@ -1,5 +1,6 @@
 mod args;
 mod container;
+mod sockets;
 
 use args::{setup_logging, Args};
 use clap::Parser;
