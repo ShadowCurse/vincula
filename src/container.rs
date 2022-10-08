@@ -3,8 +3,11 @@ use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
 
 use nix::errno::Errno;
+use nix::sched::{clone, CloneFlags};
+use nix::sys::signal::Signal;
 use nix::sys::utsname::uname;
-use nix::unistd::close;
+use nix::sys::wait::waitpid;
+use nix::unistd::{close, Pid};
 use scan_fmt::{parse::ScanError, scan_fmt};
 
 use crate::args::Args;
@@ -30,6 +33,10 @@ pub enum Error {
     SocketSend(Errno),
     #[error("Error while receiving data from socket: {0}")]
     SocketReceive(Errno),
+    #[error("Error while creating child process: {0}")]
+    CreateChild(Errno),
+    #[error("Error while whaiting for child to finish: {0}")]
+    WaitPid(Errno),
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +52,7 @@ impl ContainerConfig {
     pub fn new(command: String, uid: u32, mount_dir: PathBuf) -> Result<Self, Error> {
         let argv = command
             .split_ascii_whitespace()
-            .map(|s| CString::new(s).expect("Cannot read arg"))
+            .map(|s| CString::new(s).expect("Can not read arg"))
             .collect::<Vec<_>>();
 
         if argv.is_empty() {
@@ -66,17 +73,33 @@ impl ContainerConfig {
 pub struct Container {
     config: ContainerConfig,
     sockets: (RawFd, RawFd),
+    child_pid: Option<Pid>,
 }
 
 impl Container {
+    const STACK_SIZE: usize = 1024 * 1024;
+
     pub fn new(args: Args) -> Result<Container, Error> {
         let config = ContainerConfig::new(args.command, args.uid, args.mount_dir)?;
         let sockets = create_socketpair()?;
-        Ok(Container { config, sockets })
+        Ok(Container {
+            config,
+            sockets,
+            child_pid: None,
+        })
     }
 
     pub fn create(&mut self) -> Result<(), Error> {
+        self.child_pid = Some(self.crate_child_process()?);
         log::debug!("Creation finished");
+        Ok(())
+    }
+
+    pub fn wait_for_child(&self) -> Result<(), Error> {
+        if let Some(child_pid) = self.child_pid {
+            log::debug!("Waiting for child to finish (pid: {})", child_pid);
+            waitpid(child_pid, None).map_err(Error::WaitPid)?;
+        }
         Ok(())
     }
 
@@ -85,6 +108,36 @@ impl Container {
         close(self.sockets.0).map_err(Error::SocketClose)?;
         close(self.sockets.1).map_err(Error::SocketClose)?;
         Ok(())
+    }
+
+    fn crate_child_process(&self) -> Result<Pid, Error> {
+        log::debug!("Creating child process");
+        let mut stack = [0u8; Self::STACK_SIZE];
+        let flags = CloneFlags::from_bits_truncate(
+            CloneFlags::CLONE_NEWNS.bits()
+                | CloneFlags::CLONE_NEWCGROUP.bits()
+                | CloneFlags::CLONE_NEWPID.bits()
+                | CloneFlags::CLONE_NEWIPC.bits()
+                | CloneFlags::CLONE_NEWNET.bits()
+                | CloneFlags::CLONE_NEWUTS.bits(),
+        );
+
+        clone(
+            Box::new(|| Self::child(self.config.clone())),
+            &mut stack,
+            flags,
+            Some(Signal::SIGCHLD as i32),
+        )
+        .map_err(Error::CreateChild)
+    }
+
+    fn child(config: ContainerConfig) -> isize {
+        log::debug!(
+            "Executing: {:?} with args: {:?}",
+            config.binary_path,
+            config.argv
+        );
+        0
     }
 }
 
