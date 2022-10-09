@@ -7,7 +7,7 @@ use nix::sched::{clone, CloneFlags};
 use nix::sys::signal::Signal;
 use nix::sys::utsname::uname;
 use nix::sys::wait::waitpid;
-use nix::unistd::{close, Pid};
+use nix::unistd::{close, sethostname, Pid};
 use scan_fmt::{parse::ScanError, scan_fmt};
 
 use crate::args::Args;
@@ -46,10 +46,16 @@ pub struct ContainerConfig {
 
     pub uid: u32,
     pub mount_dir: PathBuf,
+    pub hostname: String,
 }
 
 impl ContainerConfig {
-    pub fn new(command: String, uid: u32, mount_dir: PathBuf) -> Result<Self, Error> {
+    pub fn new(
+        command: String,
+        uid: u32,
+        mount_dir: PathBuf,
+        hostname: String,
+    ) -> Result<Self, Error> {
         let argv = command
             .split_ascii_whitespace()
             .map(|s| CString::new(s).expect("Can not read arg"))
@@ -66,6 +72,7 @@ impl ContainerConfig {
             argv,
             uid,
             mount_dir,
+            hostname,
         })
     }
 }
@@ -80,7 +87,7 @@ impl Container {
     const STACK_SIZE: usize = 1024 * 1024;
 
     pub fn new(args: Args) -> Result<Container, Error> {
-        let config = ContainerConfig::new(args.command, args.uid, args.mount_dir)?;
+        let config = ContainerConfig::new(args.command, args.uid, args.mount_dir, args.hostname)?;
         let sockets = create_socketpair()?;
         Ok(Container {
             config,
@@ -90,6 +97,7 @@ impl Container {
     }
 
     pub fn create(&mut self) -> Result<(), Error> {
+        log::info!("Creating container");
         self.child_pid = Some(self.crate_child_process()?);
         log::debug!("Creation finished");
         Ok(())
@@ -137,6 +145,13 @@ impl Container {
             config.binary_path,
             config.argv
         );
+        match sethostname(config.hostname) {
+            Ok(_) => {}
+            Err(e) => {
+                log::error!("Error while setting container hostname: {}", e);
+                return -1;
+            }
+        }
         0
     }
 }

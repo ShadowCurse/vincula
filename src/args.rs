@@ -19,6 +19,10 @@ pub struct Args {
     /// Directory to mount as root of the container
     #[arg(short, long)]
     pub mount_dir: PathBuf,
+
+    /// Hostname of the container 
+    #[arg(long)]
+    pub hostname: String,
 }
 
 pub fn setup_logging(debug: bool) {
