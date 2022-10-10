@@ -3,14 +3,12 @@ use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
 
 use nix::errno::Errno;
-use nix::sched::{clone, CloneFlags};
-use nix::sys::signal::Signal;
-use nix::sys::utsname::uname;
 use nix::sys::wait::waitpid;
-use nix::unistd::{close, sethostname, Pid};
-use scan_fmt::{parse::ScanError, scan_fmt};
+use nix::unistd::{close, Pid};
+use scan_fmt::parse::ScanError;
 
 use crate::args::Args;
+use crate::child::Child;
 use crate::sockets::create_socketpair;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -79,13 +77,12 @@ impl ContainerConfig {
 
 pub struct Container {
     config: ContainerConfig,
+    // Child and parent sockets
     sockets: (RawFd, RawFd),
     child_pid: Option<Pid>,
 }
 
 impl Container {
-    const STACK_SIZE: usize = 1024 * 1024;
-
     pub fn new(args: Args) -> Result<Container, Error> {
         let config = ContainerConfig::new(args.command, args.uid, args.mount_dir, args.hostname)?;
         let sockets = create_socketpair()?;
@@ -98,7 +95,8 @@ impl Container {
 
     pub fn create(&mut self) -> Result<(), Error> {
         log::info!("Creating container");
-        self.child_pid = Some(self.crate_child_process()?);
+        self.child_pid =
+            Some(Child::new(&self.config, self.sockets.0).map_err(Error::CreateChild)?);
         log::debug!("Creation finished");
         Ok(())
     }
@@ -112,75 +110,11 @@ impl Container {
     }
 
     pub fn clean_exit(&mut self) -> Result<(), Error> {
-        log::debug!("Cleaning container");
+        log::info!("Cleaning container");
         close(self.sockets.0).map_err(Error::SocketClose)?;
         close(self.sockets.1).map_err(Error::SocketClose)?;
         Ok(())
     }
-
-    fn crate_child_process(&self) -> Result<Pid, Error> {
-        log::debug!("Creating child process");
-        let mut stack = [0u8; Self::STACK_SIZE];
-        let flags = CloneFlags::from_bits_truncate(
-            CloneFlags::CLONE_NEWNS.bits()
-                | CloneFlags::CLONE_NEWCGROUP.bits()
-                | CloneFlags::CLONE_NEWPID.bits()
-                | CloneFlags::CLONE_NEWIPC.bits()
-                | CloneFlags::CLONE_NEWNET.bits()
-                | CloneFlags::CLONE_NEWUTS.bits(),
-        );
-
-        clone(
-            Box::new(|| Self::child(self.config.clone())),
-            &mut stack,
-            flags,
-            Some(Signal::SIGCHLD as i32),
-        )
-        .map_err(Error::CreateChild)
-    }
-
-    fn child(config: ContainerConfig) -> isize {
-        log::debug!(
-            "Executing: {:?} with args: {:?}",
-            config.binary_path,
-            config.argv
-        );
-        match sethostname(config.hostname) {
-            Ok(_) => {}
-            Err(e) => {
-                log::error!("Error while setting container hostname: {}", e);
-                return -1;
-            }
-        }
-        0
-    }
-}
-
-pub const MINIMAL_KERNEL_VERSION: f32 = 4.8;
-pub const SUPPORTED_ARCH: &str = "x86_64";
-
-pub fn check_linux_version() -> Result<(), Error> {
-    let host = uname().map_err(Error::SystemInfo)?;
-    log::debug!("Linux release: {:?}", host.release());
-
-    let version = scan_fmt!(
-        host.release()
-            .to_str()
-            .expect("System version should be a valid UTF-8 string"),
-        "{f}.{}",
-        f32
-    )
-    .map_err(Error::SystemInfoScan)?;
-
-    if version < MINIMAL_KERNEL_VERSION {
-        return Err(Error::UnsupportedKernelVersion);
-    }
-
-    if host.machine() != SUPPORTED_ARCH {
-        return Err(Error::UnsupportedArchitecture);
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -189,9 +123,15 @@ mod test {
 
     #[test]
     fn container_config_new() {
-        assert!(ContainerConfig::new("command".to_string(), 0, "/mount".into()).is_ok());
+        assert!(ContainerConfig::new(
+            "command".to_string(),
+            0,
+            "/mount".into(),
+            "new_host".to_string()
+        )
+        .is_ok());
         assert_eq!(
-            ContainerConfig::new("".to_string(), 0, "/mount".into())
+            ContainerConfig::new("".to_string(), 0, "/mount".into(), "new_host".to_string())
                 .err()
                 .unwrap(),
             Error::NoBinayPath
