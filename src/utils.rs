@@ -1,4 +1,4 @@
-use nix::sys::utsname::uname;
+use nix::{sys::utsname::uname, unistd::Pid};
 use scan_fmt::scan_fmt;
 
 use crate::container::Error;
@@ -45,4 +45,14 @@ pub fn check_linux_version() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// Generates path to uid file
+pub fn uid_file(pid: Pid) -> String {
+    format!("/proc/{}/{}", pid, "uid_map")
+}
+
+/// Generates path to gid file
+pub fn gid_file(pid: Pid) -> String {
+    format!("/proc/{}/{}", pid, "gid_map")
 }

@@ -1,17 +1,21 @@
 use std::ffi::CString;
+use std::fs::{remove_dir, File};
+use std::io::Write;
 use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
+use std::string::FromUtf8Error;
 
 use nix::errno::Errno;
 use nix::sys::wait::waitpid;
-use nix::unistd::{close, Pid};
+use nix::unistd::Pid;
 use scan_fmt::parse::ScanError;
 
 use crate::args::Args;
 use crate::child::Child;
-use crate::sockets::create_socketpair;
+use crate::sockets::{self, close_socket, create_socketpair, SocketReceive, SocketSend};
+use crate::utils::{gid_file, uid_file};
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("No binary path provided in the commands")]
     NoBinayPath,
@@ -23,18 +27,20 @@ pub enum Error {
     SystemInfo(Errno),
     #[error("Error while scanning system info: {0}")]
     SystemInfoScan(ScanError),
-    #[error("Error while creating socket pair: {0}")]
-    SocketPairCreation(Errno),
-    #[error("Error while closing socket: {0}")]
-    SocketClose(Errno),
-    #[error("Error while sending data into socket: {0}")]
-    SocketSend(Errno),
-    #[error("Error while receiving data from socket: {0}")]
-    SocketReceive(Errno),
+    #[error("Error in socket: {0}")]
+    Socket(sockets::Error),
     #[error("Error while creating child process: {0}")]
     CreateChild(Errno),
+    #[error("Error while receiving child root directory: {0}")]
+    InvalidChildRootDir(FromUtf8Error),
     #[error("Error while whaiting for child to finish: {0}")]
     WaitPid(Errno),
+    #[error("Error while dealing with uid map file: {0}")]
+    UidMap(std::io::Error),
+    #[error("Error while dealing with gid map file: {0}")]
+    GidMap(std::io::Error),
+    #[error("Error while removing child root directory: {0}")]
+    ChildRootDir(std::io::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -80,16 +86,21 @@ pub struct Container {
     // Child and parent sockets
     sockets: (RawFd, RawFd),
     child_pid: Option<Pid>,
+    child_root_dir: Option<String>,
 }
 
 impl Container {
+    const USERNS_OFFSET: u32 = 10000;
+    const USERNS_COUNT: u32 = 200;
+
     pub fn new(args: Args) -> Result<Container, Error> {
         let config = ContainerConfig::new(args.command, args.uid, args.mount_dir, args.hostname)?;
-        let sockets = create_socketpair()?;
+        let sockets = create_socketpair().map_err(Error::Socket)?;
         Ok(Container {
             config,
             sockets,
             child_pid: None,
+            child_root_dir: None,
         })
     }
 
@@ -97,6 +108,8 @@ impl Container {
         log::info!("Creating container");
         self.child_pid =
             Some(Child::new(&self.config, self.sockets.0).map_err(Error::CreateChild)?);
+        self.get_child_root_dir()?;
+        self.handle_child_uid_map()?;
         log::debug!("Creation finished");
         Ok(())
     }
@@ -111,30 +124,41 @@ impl Container {
 
     pub fn clean_exit(&mut self) -> Result<(), Error> {
         log::info!("Cleaning container");
-        close(self.sockets.0).map_err(Error::SocketClose)?;
-        close(self.sockets.1).map_err(Error::SocketClose)?;
+        close_socket(self.sockets.0).map_err(Error::Socket)?;
+        close_socket(self.sockets.1).map_err(Error::Socket)?;
+        remove_dir(self.child_root_dir.as_ref().unwrap()).map_err(Error::ChildRootDir)?;
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod test {
-    use super::*;
+    fn get_child_root_dir(&mut self) -> Result<(), Error> {
+        let root_dir: [u8; Child::TMP_ROOT_PATH_SIZE] =
+            self.sockets.1.receive().map_err(Error::Socket)?;
+        let root_dir = String::from_utf8(root_dir.into()).map_err(Error::InvalidChildRootDir)?;
+        log::debug!("Got child rood directory: {}", root_dir);
+        self.child_root_dir = Some(root_dir);
+        Ok(())
+    }
 
-    #[test]
-    fn container_config_new() {
-        assert!(ContainerConfig::new(
-            "command".to_string(),
-            0,
-            "/mount".into(),
-            "new_host".to_string()
-        )
-        .is_ok());
-        assert_eq!(
-            ContainerConfig::new("".to_string(), 0, "/mount".into(), "new_host".to_string())
-                .err()
-                .unwrap(),
-            Error::NoBinayPath
-        );
+    fn handle_child_uid_map(&self) -> Result<(), Error> {
+        let has_userns = self.sockets.1.receive().map_err(Error::Socket)?;
+
+        // Setting up userns for the child
+        if has_userns {
+            let content = format!("0 {} {}", Self::USERNS_OFFSET, Self::USERNS_COUNT);
+            let mut uid_file =
+                File::create(uid_file(self.child_pid.unwrap())).map_err(Error::UidMap)?;
+            uid_file
+                .write_all(content.as_bytes())
+                .map_err(Error::UidMap)?;
+            let mut gid_file =
+                File::create(gid_file(self.child_pid.unwrap())).map_err(Error::GidMap)?;
+            gid_file
+                .write_all(content.as_bytes())
+                .map_err(Error::GidMap)?;
+        }
+
+        self.sockets.1.send(false).map_err(Error::Socket)?;
+
+        Ok(())
     }
 }
