@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+use capctl::{Cap, FullCapState};
 use nix::{
     errno::Errno,
     mount::{mount, umount2, MntFlags, MsFlags},
@@ -44,6 +45,8 @@ pub enum Error {
     SetResgid(Errno),
     #[error("Error while setting resuid: {0}")]
     SetResuid(Errno),
+    #[error("Error while getting capabilities: {0}")]
+    CapState(std::io::Error),
 }
 
 #[allow(clippy::from_over_into)]
@@ -62,6 +65,7 @@ impl Into<isize> for Error {
             Error::SetGroups(_) => -10,
             Error::SetResgid(_) => -11,
             Error::SetResuid(_) => -12,
+            Error::CapState(_) => -13,
         }
     }
 }
@@ -71,6 +75,29 @@ pub struct Child;
 impl Child {
     pub const STACK_SIZE: usize = 1024 * 1024;
     pub const TMP_ROOT_PATH_SIZE: usize = "/tmp/vincula.".len() + 16;
+    const CAPABILITIES_DROP: [Cap; 21] = [
+        Cap::AUDIT_CONTROL,
+        Cap::AUDIT_READ,
+        Cap::AUDIT_WRITE,
+        Cap::BLOCK_SUSPEND,
+        Cap::DAC_READ_SEARCH,
+        Cap::DAC_OVERRIDE,
+        Cap::FSETID,
+        Cap::IPC_LOCK,
+        Cap::MAC_ADMIN,
+        Cap::MAC_OVERRIDE,
+        Cap::MKNOD,
+        Cap::SETFCAP,
+        Cap::SYSLOG,
+        Cap::SYS_ADMIN,
+        Cap::SYS_BOOT,
+        Cap::SYS_MODULE,
+        Cap::SYS_NICE,
+        Cap::SYS_RAWIO,
+        Cap::SYS_RESOURCE,
+        Cap::SYS_TIME,
+        Cap::WAKE_ALARM,
+    ];
 
     /// Creates new child process by cloning current one and returns new PID
     /// Child process starts executing ['Child::run'] method
@@ -115,6 +142,7 @@ impl Child {
         sethostname(config.hostname.clone()).map_err(Error::SetHostname)?;
         Self::change_root(&config, socket)?;
         Self::set_uid(config.uid, socket)?;
+        Self::set_capabilities()?;
         Ok(())
     }
 
@@ -195,6 +223,16 @@ impl Child {
         setresgid(gid, gid, gid).map_err(Error::SetResgid)?;
         setresuid(uid, uid, uid).map_err(Error::SetResuid)?;
 
+        Ok(())
+    }
+
+    fn set_capabilities() -> Result<(), Error> {
+        log::debug!("Clearing unwanted capabilities ...");
+        let mut caps = FullCapState::get_current().map_err(Error::CapState)?;
+        caps.bounding
+            .drop_all(Self::CAPABILITIES_DROP.iter().cloned());
+        caps.inheritable
+            .drop_all(Self::CAPABILITIES_DROP.iter().cloned());
         Ok(())
     }
 }
