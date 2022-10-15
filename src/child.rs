@@ -5,13 +5,15 @@ use std::{
 };
 
 use capctl::{Cap, FullCapState};
+use libc::{EPERM, TIOCSTI};
 use nix::{
     errno::Errno,
     mount::{mount, umount2, MntFlags, MsFlags},
     sched::{clone, unshare, CloneFlags},
-    sys::signal::Signal,
+    sys::{signal::Signal, stat::Mode},
     unistd::{chdir, pivot_root, setgroups, sethostname, setresgid, setresuid, Gid, Pid, Uid},
 };
+use syscallz::{Action, Cmp, Comparator, Context, Syscall};
 
 use crate::{
     container::ContainerConfig,
@@ -47,6 +49,14 @@ pub enum Error {
     SetResuid(Errno),
     #[error("Error while getting capabilities: {0}")]
     CapState(std::io::Error),
+    #[error("Error while creating seccomp context: {0}")]
+    SeccompCtx(syscallz::Error),
+    #[error("Error while setting seccomp rule: {0}")]
+    SeccompSetRule(syscallz::Error),
+    #[error("Error while setting seccomp action: {0}")]
+    SeccompSetAction(syscallz::Error),
+    #[error("Error while loading seccomp: {0}")]
+    SeccompLoad(syscallz::Error),
 }
 
 #[allow(clippy::from_over_into)]
@@ -66,6 +76,10 @@ impl Into<isize> for Error {
             Error::SetResgid(_) => -11,
             Error::SetResuid(_) => -12,
             Error::CapState(_) => -13,
+            Error::SeccompCtx(_) => -14,
+            Error::SeccompSetRule(_) => -15,
+            Error::SeccompSetAction(_) => -16,
+            Error::SeccompLoad(_) => -17,
         }
     }
 }
@@ -75,7 +89,7 @@ pub struct Child;
 impl Child {
     pub const STACK_SIZE: usize = 1024 * 1024;
     pub const TMP_ROOT_PATH_SIZE: usize = "/tmp/vincula.".len() + 16;
-    const CAPABILITIES_DROP: [Cap; 21] = [
+    pub const CAPABILITIES_DROP: [Cap; 21] = [
         Cap::AUDIT_CONTROL,
         Cap::AUDIT_READ,
         Cap::AUDIT_WRITE,
@@ -97,6 +111,29 @@ impl Child {
         Cap::SYS_RESOURCE,
         Cap::SYS_TIME,
         Cap::WAKE_ALARM,
+    ];
+    pub const SYSCALL_REFUSE_CMP: [(Syscall, u32, u64); 9] = [
+        // Syscal | Arg position | Compare to
+        (Syscall::chmod, 1, Mode::S_ISUID.bits() as u64),
+        (Syscall::chmod, 1, Mode::S_ISGID.bits() as u64),
+        (Syscall::fchmod, 1, Mode::S_ISUID.bits() as u64),
+        (Syscall::fchmod, 1, Mode::S_ISGID.bits() as u64),
+        (Syscall::fchmodat, 1, Mode::S_ISUID.bits() as u64),
+        (Syscall::fchmodat, 1, Mode::S_ISUID.bits() as u64),
+        (Syscall::unshare, 1, CloneFlags::CLONE_NEWUSER.bits() as u64),
+        (Syscall::clone, 1, CloneFlags::CLONE_NEWUSER.bits() as u64),
+        (Syscall::ioctl, 1, TIOCSTI),
+    ];
+    pub const SYSCALL_REFUSE: [Syscall; 9] = [
+        Syscall::keyctl,
+        Syscall::add_key,
+        Syscall::request_key,
+        Syscall::mbind,
+        Syscall::migrate_pages,
+        Syscall::move_pages,
+        Syscall::set_mempolicy,
+        Syscall::userfaultfd,
+        Syscall::perf_event_open,
     ];
 
     /// Creates new child process by cloning current one and returns new PID
@@ -143,6 +180,7 @@ impl Child {
         Self::change_root(&config, socket)?;
         Self::set_uid(config.uid, socket)?;
         Self::set_capabilities()?;
+        Self::restrict_syscalls()?;
         Ok(())
     }
 
@@ -227,12 +265,35 @@ impl Child {
     }
 
     fn set_capabilities() -> Result<(), Error> {
-        log::debug!("Clearing unwanted capabilities ...");
+        log::debug!("Clearing unwanted capabilities");
         let mut caps = FullCapState::get_current().map_err(Error::CapState)?;
         caps.bounding
             .drop_all(Self::CAPABILITIES_DROP.iter().cloned());
         caps.inheritable
             .drop_all(Self::CAPABILITIES_DROP.iter().cloned());
+        Ok(())
+    }
+
+    fn restrict_syscalls() -> Result<(), Error> {
+        log::debug!("Restricting syscalls");
+        let mut ctx = Context::init_with_action(Action::Allow).map_err(Error::SeccompCtx)?;
+
+        for (syscall, arg, cmp) in Self::SYSCALL_REFUSE_CMP.iter() {
+            ctx.set_rule_for_syscall(
+                Action::Errno(EPERM as u16),
+                *syscall,
+                &[Comparator::new(*arg, Cmp::MaskedEq, *cmp, Some(*cmp))],
+            )
+            .map_err(Error::SeccompSetRule)?;
+        }
+
+        for syscall in Self::SYSCALL_REFUSE.iter() {
+            ctx.set_action_for_syscall(Action::Errno(EPERM as u16), *syscall)
+                .map_err(Error::SeccompSetAction)?;
+        }
+
+        ctx.load().map_err(Error::SeccompLoad)?;
+
         Ok(())
     }
 }
