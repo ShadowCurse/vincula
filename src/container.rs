@@ -1,13 +1,17 @@
 use std::ffi::CString;
-use std::fs::{remove_dir, File};
+use std::fs::{canonicalize, remove_dir, File};
 use std::io::Write;
 use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
 use std::string::FromUtf8Error;
 
+use cgroups_rs::cgroup_builder::CgroupBuilder;
+use cgroups_rs::hierarchies::V2;
+use cgroups_rs::{CgroupPid, MaxValue};
 use nix::errno::Errno;
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
+use rlimit::{setrlimit, Resource};
 use scan_fmt::parse::ScanError;
 
 use crate::args::Args;
@@ -41,6 +45,14 @@ pub enum Error {
     GidMap(std::io::Error),
     #[error("Error while removing child root directory: {0}")]
     ChildRootDir(std::io::Error),
+    #[error("Error while adding task to cgroup: {0}")]
+    CgroupAddTask(cgroups_rs::error::Error),
+    #[error("Error while setting rlimit: {0}")]
+    SetRlimit(std::io::Error),
+    #[error("Error while cleaning cgroups: {0}")]
+    CleanCgroups(std::io::Error),
+    #[error("Error while getting canonical path: {0}")]
+    NonCanonicalPath(std::io::Error),
 }
 
 #[derive(Debug, Clone)]
@@ -90,8 +102,12 @@ pub struct Container {
 }
 
 impl Container {
-    const USERNS_OFFSET: u32 = 10000;
-    const USERNS_COUNT: u32 = 200;
+    pub const USERNS_OFFSET: u32 = 10000;
+    pub const USERNS_COUNT: u32 = 200;
+    pub const KMEM_LIMIT: i64 = 1024 * 1024 * 1024;
+    pub const MEM_LIMIT: i64 = Self::KMEM_LIMIT;
+    pub const MAX_PID: MaxValue = MaxValue::Value(64);
+    pub const NOFILE_RLIMTI: u64 = 64;
 
     pub fn new(args: Args) -> Result<Container, Error> {
         let config = ContainerConfig::new(args.command, args.uid, args.mount_dir, args.hostname)?;
@@ -108,6 +124,7 @@ impl Container {
         log::info!("Creating container");
         self.child_pid =
             Some(Child::new(&self.config, self.sockets.0).map_err(Error::CreateChild)?);
+        self.restrict_resources()?;
         self.get_child_root_dir()?;
         self.handle_child_uid_map()?;
         log::debug!("Creation finished");
@@ -127,6 +144,7 @@ impl Container {
         close_socket(self.sockets.0).map_err(Error::Socket)?;
         close_socket(self.sockets.1).map_err(Error::Socket)?;
         remove_dir(self.child_root_dir.as_ref().unwrap()).map_err(Error::ChildRootDir)?;
+        self.clean_cgroups()?;
         Ok(())
     }
 
@@ -142,7 +160,7 @@ impl Container {
     fn handle_child_uid_map(&self) -> Result<(), Error> {
         let has_userns = self.sockets.1.receive().map_err(Error::Socket)?;
 
-        // Setting up userns for the child
+        log::debug!("Setting up userns for the child");
         if has_userns {
             let content = format!("0 {} {}", Self::USERNS_OFFSET, Self::USERNS_COUNT);
             let mut uid_file =
@@ -159,6 +177,43 @@ impl Container {
 
         self.sockets.1.send(false).map_err(Error::Socket)?;
 
+        Ok(())
+    }
+
+    fn restrict_resources(&self) -> Result<(), Error> {
+        log::debug!("Restricting resources for the child");
+
+        let cgs = CgroupBuilder::new(&self.config.hostname)
+            .cpu()
+            .shares(256)
+            .done()
+            .memory()
+            .kernel_memory_limit(Self::KMEM_LIMIT)
+            .memory_hard_limit(Self::MEM_LIMIT)
+            .done()
+            .pid()
+            .maximum_number_of_processes(Self::MAX_PID)
+            .done()
+            .blkio()
+            .weight(50)
+            .done()
+            .build(Box::new(V2::new()));
+
+        cgs.add_task(CgroupPid::from(
+            self.child_pid.as_ref().unwrap().as_raw() as u64
+        ))
+        .map_err(Error::CgroupAddTask)?;
+
+        setrlimit(Resource::NOFILE, Self::NOFILE_RLIMTI, Self::NOFILE_RLIMTI)
+            .map_err(Error::SetRlimit)?;
+
+        Ok(())
+    }
+
+    fn clean_cgroups(&self) -> Result<(), Error> {
+        let path = canonicalize(format!("/sys/fs/cgroup/{}/", self.config.hostname))
+            .map_err(Error::NonCanonicalPath)?;
+        remove_dir(path).map_err(Error::CleanCgroups)?;
         Ok(())
     }
 }

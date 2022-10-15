@@ -5,12 +5,14 @@ edition = "2021"
 
 [dependencies]
 capctl = "0.2.2"
+cgroups-rs = "0.2.11"
 clap = { version = "4.0.7", features = ["derive"] }
 env_logger = "0.9.1"
 libc = "0.2.135"
 log = "0.4.17"
 nix = "0.25.0"
 rand = "0.8.5"
+rlimit = "0.8.3"
 scan_fmt = "0.2.6"
 syscallz = "0.16.1"
 thiserror = "1.0.37"
