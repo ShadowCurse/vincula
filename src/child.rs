@@ -1,4 +1,5 @@
 use std::{
+    ffi::CString,
     fs::{create_dir_all, remove_dir},
     os::unix::prelude::RawFd,
     path::PathBuf,
@@ -11,7 +12,9 @@ use nix::{
     mount::{mount, umount2, MntFlags, MsFlags},
     sched::{clone, unshare, CloneFlags},
     sys::{signal::Signal, stat::Mode},
-    unistd::{chdir, pivot_root, setgroups, sethostname, setresgid, setresuid, Gid, Pid, Uid},
+    unistd::{
+        chdir, execve, pivot_root, setgroups, sethostname, setresgid, setresuid, Gid, Pid, Uid,
+    },
 };
 use syscallz::{Action, Cmp, Comparator, Context, Syscall};
 
@@ -57,6 +60,8 @@ pub enum Error {
     SeccompSetAction(syscallz::Error),
     #[error("Error while loading seccomp: {0}")]
     SeccompLoad(syscallz::Error),
+    #[error("Error while executing binary: {0}")]
+    Execve(Errno),
 }
 
 #[allow(clippy::from_over_into)]
@@ -80,6 +85,7 @@ impl Into<isize> for Error {
             Error::SeccompSetRule(_) => -15,
             Error::SeccompSetAction(_) => -16,
             Error::SeccompLoad(_) => -17,
+            Error::Execve(_) => -18,
         }
     }
 }
@@ -181,6 +187,9 @@ impl Child {
         Self::set_uid(config.uid, socket)?;
         Self::set_capabilities()?;
         Self::restrict_syscalls()?;
+
+        execve::<_, CString>(&config.binary_path, &config.argv, &[]).map_err(Error::Execve)?;
+
         Ok(())
     }
 
