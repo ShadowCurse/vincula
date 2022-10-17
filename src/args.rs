@@ -1,5 +1,6 @@
-use clap::Parser;
 use std::path::PathBuf;
+
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -20,7 +21,11 @@ pub struct Args {
     #[arg(short, long)]
     pub mount_dir: PathBuf,
 
-    /// Hostname of the container 
+    /// Additional directories to mount
+    #[arg(short, long)]
+    pub additional_mounts: Vec<String>,
+
+    /// Hostname of the container
     #[arg(long)]
     pub hostname: String,
 }

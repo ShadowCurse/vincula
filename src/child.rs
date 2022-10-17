@@ -166,12 +166,6 @@ impl Child {
     }
 
     fn run(config: ContainerConfig, socket: RawFd) -> isize {
-        log::debug!(
-            "Executing: {:?} with args: {:?}",
-            config.binary_path,
-            config.argv
-        );
-
         match Self::run_inner(config, socket) {
             Ok(_) => 0,
             Err(e) => {
@@ -188,13 +182,18 @@ impl Child {
         Self::set_capabilities()?;
         Self::restrict_syscalls()?;
 
+        log::info!(
+            "Executing: {:?} with args: {:?}",
+            config.binary_path,
+            config.argv
+        );
         execve::<_, CString>(&config.binary_path, &config.argv, &[]).map_err(Error::Execve)?;
 
         Ok(())
     }
 
     fn change_root(config: &ContainerConfig, socket: RawFd) -> Result<(), Error> {
-        // Remounting root
+        // Remounting old root
         let mount_flags =
             MsFlags::from_bits_truncate(MsFlags::MS_REC.bits() | MsFlags::MS_PRIVATE.bits());
         mount(
@@ -227,6 +226,29 @@ impl Child {
         let old_root = PathBuf::from(format!("old_root.{}", random_string(16)));
         let old_root_dir = new_root_path.join(old_root.clone());
         create_dir_all(old_root_dir.clone()).map_err(Error::CreateDir)?;
+
+        // Mounting additional mounts
+        for (from, to, args) in config.additional_mounts.iter() {
+            // Creating directories for mounts
+            let new_to = new_root_path.join(to);
+            log::debug!("Mounting additional directory: {:?} to {:?}", from, new_to);
+            create_dir_all(new_to.clone()).map_err(Error::CreateDir)?;
+
+            let mut mount_flags =
+                MsFlags::from_bits_truncate(MsFlags::MS_BIND.bits() | MsFlags::MS_PRIVATE.bits());
+            if let Some(args) = args {
+                mount_flags.insert(*args);
+            }
+
+            mount(
+                Some(from),
+                &new_to,
+                Option::<&PathBuf>::None,
+                mount_flags,
+                Option::<&PathBuf>::None,
+            )
+            .map_err(Error::Mount)?;
+        }
 
         // Pivot the root
         pivot_root(&new_root_path, &old_root_dir).map_err(Error::PivotRoot)?;
