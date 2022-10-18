@@ -70,3 +70,10 @@ impl<const S: usize> SocketReceive<[u8; S]> for RawFd {
         Ok(data)
     }
 }
+
+impl SocketSend<&[u8]> for RawFd {
+    fn send(&self, data: &[u8]) -> Result<(), Error> {
+        let _ = send(*self, data, MsgFlags::empty()).map_err(Error::Send)?;
+        Ok(())
+    }
+}

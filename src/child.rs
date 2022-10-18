@@ -165,6 +165,8 @@ impl Child {
         )
     }
 
+    /// Child execution starts here
+    /// This method just wrapps ['Child::run_inner'] and converts its result into isize
     fn run(config: ContainerConfig, socket: RawFd) -> isize {
         match Self::run_inner(config, socket) {
             Ok(_) => 0,
@@ -175,10 +177,11 @@ impl Child {
         }
     }
 
+    /// Main child runtime
     fn run_inner(config: ContainerConfig, socket: RawFd) -> Result<(), Error> {
         sethostname(config.hostname.clone()).map_err(Error::SetHostname)?;
-        Self::change_root(&config, socket)?;
-        Self::set_uid(config.uid, socket)?;
+        Self::set_mounts(&config, socket)?;
+        Self::set_uid_gid(config.uid, socket)?;
         Self::set_capabilities()?;
         Self::restrict_syscalls()?;
 
@@ -192,7 +195,19 @@ impl Child {
         Ok(())
     }
 
-    fn change_root(config: &ContainerConfig, socket: RawFd) -> Result<(), Error> {
+    /// This method deals with all mounting related stuff
+    /// Overall steps are:
+    /// - remount `/` with `MS_PRIVATE`
+    /// - create new root directory in `/tmp` in a form `/tmp/vincula.{}`
+    /// - mount provided path to new root
+    /// - mount additional directories
+    /// - create directory for the old root
+    /// - `pivot_root` with new and old root
+    /// - change directory to `/`
+    /// - unmount old root
+    /// - remove old root directory
+    /// - send new root directory path to the parent process through the socket (for the cleanup)
+    fn set_mounts(config: &ContainerConfig, socket: RawFd) -> Result<(), Error> {
         // Remounting old root
         let mount_flags =
             MsFlags::from_bits_truncate(MsFlags::MS_REC.bits() | MsFlags::MS_PRIVATE.bits());
@@ -222,11 +237,6 @@ impl Child {
         )
         .map_err(Error::Mount)?;
 
-        // Creating directory for the old root
-        let old_root = PathBuf::from(format!("old_root.{}", random_string(16)));
-        let old_root_dir = new_root_path.join(old_root.clone());
-        create_dir_all(old_root_dir.clone()).map_err(Error::CreateDir)?;
-
         // Mounting additional mounts
         for (from, to, args) in config.additional_mounts.iter() {
             // Creating directories for mounts
@@ -250,6 +260,11 @@ impl Child {
             .map_err(Error::Mount)?;
         }
 
+        // Creating directory for the old root
+        let old_root = PathBuf::from(format!("old_root.{}", random_string(16)));
+        let old_root_dir = new_root_path.join(old_root.clone());
+        create_dir_all(old_root_dir.clone()).map_err(Error::CreateDir)?;
+
         // Pivot the root
         pivot_root(&new_root_path, &old_root_dir).map_err(Error::PivotRoot)?;
 
@@ -263,16 +278,15 @@ impl Child {
         remove_dir(&old_root).map_err(Error::RemoveDir)?;
 
         // Sending root path to parent so it would clean this directory in cleanup
-        <RawFd as SocketSend<[u8; Self::TMP_ROOT_PATH_SIZE]>>::send(
-            &socket,
-            new_root.into_bytes().try_into().unwrap(),
-        )
-        .map_err(Error::SocketError)?;
+        socket
+            .send(new_root.into_bytes().as_slice())
+            .map_err(Error::SocketError)?;
 
         Ok(())
     }
 
-    fn set_uid(uid: u32, socket: RawFd) -> Result<(), Error> {
+    /// Sets uid and gid for the current process
+    fn set_uid_gid(uid: u32, socket: RawFd) -> Result<(), Error> {
         let has_userns = unshare(CloneFlags::CLONE_NEWUSER).is_ok();
         log::debug!("Checking userns support: {}", has_userns);
 
@@ -295,6 +309,7 @@ impl Child {
         Ok(())
     }
 
+    /// Sets capabilities for the current process
     fn set_capabilities() -> Result<(), Error> {
         log::debug!("Clearing unwanted capabilities");
         let mut caps = FullCapState::get_current().map_err(Error::CapState)?;
@@ -305,6 +320,7 @@ impl Child {
         Ok(())
     }
 
+    /// Restricts syscalls for the current process
     fn restrict_syscalls() -> Result<(), Error> {
         log::debug!("Restricting syscalls");
         let mut ctx = Context::init_with_action(Action::Allow).map_err(Error::SeccompCtx)?;
