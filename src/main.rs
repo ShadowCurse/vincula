@@ -4,15 +4,26 @@ mod container;
 mod sockets;
 mod utils;
 
-use args::{setup_logging, Args};
+use args::Args;
 use clap::Parser;
+use log::error;
+use utils::setup_logging;
 
 use crate::{
     container::{Container, Error},
     utils::check_linux_version,
 };
 
-fn main() -> Result<(), Error> {
+fn main() {
+    match actual_main() {
+        Ok(_) => {}
+        Err(e) => {
+            error!("{}", e)
+        }
+    }
+}
+
+fn actual_main() -> Result<(), Error> {
     let args = Args::parse();
 
     setup_logging(args.debug);

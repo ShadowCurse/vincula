@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::fs::{canonicalize, remove_dir, File};
+use std::fs::{canonicalize, metadata, remove_dir, File};
 use std::io::Write;
 use std::os::unix::prelude::RawFd;
 use std::path::PathBuf;
@@ -24,6 +24,8 @@ use crate::utils::{gid_file, uid_file};
 pub enum Error {
     #[error("No binary path provided in the commands")]
     NoBinayPath,
+    #[error("Error in provided path: {0}")]
+    PathError(std::io::Error),
     #[error("Unsupported kernel version")]
     UnsupportedKernelVersion,
     #[error("Unsupported architecture")]
@@ -90,6 +92,8 @@ impl ContainerConfig {
 
         let binary_path = argv[0].clone();
 
+        metadata(mount_dir.clone()).map_err(Error::PathError)?;
+
         let additional_mounts = additional_mounts
             .into_iter()
             .map(|mount| {
@@ -98,6 +102,7 @@ impl ContainerConfig {
                     return Err(Error::AddionalMountArg);
                 }
                 let from = canonicalize(parts[0]).map_err(Error::AddionalMountPath)?;
+                metadata(from.clone()).map_err(Error::PathError)?;
                 let to = canonicalize(parts[1])
                     .map_err(Error::AddionalMountPath)?
                     .strip_prefix("/")
